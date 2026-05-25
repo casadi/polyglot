@@ -38,16 +38,18 @@ jobs:
       matrix:
         include:
           - arch: x64
-            tag_suffix: manylinux_2_28-x64
+            polyglot_image: ghcr.io/${{ github.repository_owner }}/manylinux_2_28-x64-polyglot:production
             runner: ubuntu-latest
-          - arch: aarch64
-            tag_suffix: manylinux_2_28-aarch64
-            runner: ubuntu-24.04-arm
+          # aarch64 parked along with the docker-branch matrix entry. Re-enable
+          # once ghcr.io/casadi/manylinux_2_28-aarch64-polyglot:production exists.
+          # - arch: aarch64
+          #   polyglot_image: ghcr.io/${{ github.repository_owner }}/manylinux_2_28-aarch64-polyglot:production
+          #   runner: ubuntu-24.04-arm
 
     env:
       LIBMAD_REPO: ${{ github.event.inputs.libmad_repo || 'jgillis/libMad' }}
       LIBMAD_REF: ${{ github.event.inputs.libmad_ref || 'claude/ubuntu-manylinux-2-28-kLLSc' }}
-      POLYGLOT_IMAGE: ghcr.io/${{ github.repository_owner }}/polyglot:${{ matrix.tag_suffix }}
+      POLYGLOT_IMAGE: ${{ matrix.polyglot_image }}
 
     steps:
       - name: Log in to GHCR
