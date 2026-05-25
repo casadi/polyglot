@@ -40,11 +40,9 @@ jobs:
           - arch: x64
             polyglot_image: ghcr.io/${{ github.repository_owner }}/manylinux_2_28-x64-polyglot:production
             runner: ubuntu-latest
-          # aarch64 parked along with the docker-branch matrix entry. Re-enable
-          # once ghcr.io/casadi/manylinux_2_28-aarch64-polyglot:production exists.
-          # - arch: aarch64
-          #   polyglot_image: ghcr.io/${{ github.repository_owner }}/manylinux_2_28-aarch64-polyglot:production
-          #   runner: ubuntu-24.04-arm
+          - arch: aarch64
+            polyglot_image: ghcr.io/${{ github.repository_owner }}/manylinux_2_28-aarch64-polyglot:production
+            runner: ubuntu-24.04-arm
 
     env:
       LIBMAD_REPO: ${{ github.event.inputs.libmad_repo || 'jgillis/libMad' }}
