@@ -5,20 +5,17 @@ on:
     branches: [main]
     paths:
       - .github/workflows/build-libmad.yml
+      - scripts/**
   workflow_dispatch:
     inputs:
       libmad_repo:
-        description: libMad git URL
+        description: libMad repo (owner/name)
         required: false
-        default: https://github.com/jgillis/libMad.git
+        default: jgillis/libMad
       libmad_ref:
         description: libMad branch / tag / sha
         required: false
         default: claude/ubuntu-manylinux-2-28-kLLSc
-      polyglot_tag:
-        description: polyglot image tag suffix (e.g. manylinux_2_28-x64)
-        required: false
-        default: manylinux_2_28-x64
   schedule:
     # Weekly rebuild against latest polyglot image, in case upstream libMad
     # deps drift. Delete if not wanted.
@@ -34,7 +31,7 @@ concurrency:
 
 jobs:
   build:
-    name: libMad (${{ matrix.arch }})
+    name: libMad ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -48,12 +45,12 @@ jobs:
             runner: ubuntu-24.04-arm
 
     env:
-      LIBMAD_REPO: ${{ github.event.inputs.libmad_repo || 'https://github.com/jgillis/libMad.git' }}
+      LIBMAD_REPO: ${{ github.event.inputs.libmad_repo || 'jgillis/libMad' }}
       LIBMAD_REF: ${{ github.event.inputs.libmad_ref || 'claude/ubuntu-manylinux-2-28-kLLSc' }}
       POLYGLOT_IMAGE: ghcr.io/${{ github.repository_owner }}/polyglot:${{ matrix.tag_suffix }}
 
     steps:
-      - name: Log in to GHCR (to pull polyglot image)
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -66,10 +63,15 @@ jobs:
       - name: Checkout libMad
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.LIBMAD_REPO == 'https://github.com/jgillis/libMad.git' && 'jgillis/libMad' || '' }}
+          repository: ${{ env.LIBMAD_REPO }}
           ref: ${{ env.LIBMAD_REF }}
           path: libMad
           fetch-depth: 1
+
+      - name: Checkout this repo (for scripts/)
+        uses: actions/checkout@v4
+        with:
+          path: polyglot
 
       - name: Build libMad inside polyglot image
         run: |
@@ -77,83 +79,30 @@ jobs:
           mkdir -p build out
           docker run --rm \
             -v "$PWD/libMad:/work/libMad:ro" \
+            -v "$PWD/polyglot/scripts:/work/scripts:ro" \
             -v "$PWD/build:/work/build" \
             -v "$PWD/out:/work/out" \
             -e JULIA_PKG_USE_CLI_GIT=true \
             "$POLYGLOT_IMAGE" \
-            bash -e -c '
-              export JULIA_DEPOT_PATH=/work/build/.julia
-              export PATH=$JULIA_DEPOT_PATH/bin:$PATH
-
-              # All SSH git deps in libMads Manifest are public — use HTTPS.
-              git config --global url."https://github.com/".insteadOf "git@github.com:"
-
-              # 1) Install apozharskis patched JuliaC.jl as a Pkg app.
-              julia -e "using Pkg; Pkg.add(url=\"https://github.com/apozharski/JuliaC.jl.git\"); Pkg.Apps.add(url=\"https://github.com/apozharski/JuliaC.jl.git\")"
-
-              # 2) Pre-instantiate libMad project so CUDA_Driver_jll is in depot.
-              julia --project=/work/libMad -e "using Pkg; Pkg.instantiate()"
-
-              # 3) Patch CUDA_Driver_jlls JULIA_CUDA_USE_COMPAT default from
-              #    "missing" to "false" so the bundle does not need an env var
-              #    at runtime. Without this, CUDA_Driver_jll spawns a Julia
-              #    subprocess (via inspect_driver) that fails inside an
-              #    AOT-compiled bundle. The fork is the same idea as the
-              #    runtime workaround in libMads README.
-              python3 <<PYEOF
-import re, glob, sys
-files = sorted(glob.glob(f"{__import__(\"os\").environ[\"JULIA_DEPOT_PATH\"]}/packages/CUDA_Driver_jll/*/src/wrappers/x86_64-linux-gnu.jl"))
-files += sorted(glob.glob(f"{__import__(\"os\").environ[\"JULIA_DEPOT_PATH\"]}/packages/CUDA_Driver_jll/*/src/wrappers/aarch64-linux-gnu.jl"))
-pat = re.compile(
-    r"(elseif haskey\(ENV, \"JULIA_CUDA_USE_COMPAT\"\)\s*\n"
-    r"\s*parse_preference\(ENV\[\"JULIA_CUDA_USE_COMPAT\"\]\)\s*\n"
-    r"\s*else\s*\n"
-    r"\s*)missing(\s*\n\s*end)"
-)
-for f in files:
-    s = open(f).read()
-    new, n = pat.subn(r"\1false  # polyglot default: skip forward-compat CUDA driver lookup\2", s)
-    if n:
-        open(f, "w").write(new); print("patched", f)
-    else:
-        print("WARN: pattern did not match in", f, "(already patched?)")
-PYEOF
-
-              # 4) Configure + build. juliacs internal multi-target AOT compile
-              #    threads race with `make -j>1` and SIGTERM each other; use -j1.
-              cmake -S /work/libMad -B /work/build/cmake \
-                -DCMAKE_INSTALL_PREFIX=/work/build/install
-              cmake --build /work/build/cmake --target install --config Release -- -j1
-
-              # 5) Tar up the install for upload, drop unused CUDA artifacts.
-              if [ -f /work/libMad/scripts/trim_cuda_artifacts.jl ]; then
-                cd /work/build/install/share/julia/artifacts || true
-                TRIM=$(julia --project=/work/libMad /work/libMad/scripts/trim_cuda_artifacts.jl 2>/dev/null || true)
-                [ -n "${TRIM:-}" ] && rm -rf $TRIM || true
-              fi
-              cd /work/build
-              tar -czf /work/out/libMad-${ARCH:-bundle}.tar.gz -C install .
-            '
-        env:
-          ARCH: ${{ matrix.arch }}
+            bash /work/scripts/build-libmad.sh
 
       - name: Inspect libMad.so manylinux compliance
         run: |
           set -e
           SO=$(find build/install -name 'libMad.so*' -type f | head -1)
+          test -n "$SO"
           echo "=== $SO ==="
           file "$SO"
           echo "=== NEEDED ==="; objdump -p "$SO" | grep NEEDED
           echo "=== required GLIBC ==="; objdump -T "$SO" | grep -oE 'GLIBC_[0-9.]+' | sort -Vu
           echo "=== required GLIBCXX ==="; objdump -T "$SO" | grep -oE 'GLIBCXX_[0-9.]+' | sort -Vu || echo "(none)"
           echo "=== required CXXABI ==="; objdump -T "$SO" | grep -oE 'CXXABI_[0-9.]+' | sort -Vu || echo "(none)"
-          # Fail the job if libunwind sneaks in
           if objdump -p "$SO" | grep -q 'NEEDED.*libunwind'; then
-            echo "FAIL: libMad.so has a NEEDED on libunwind"; exit 1
+            echo "FAIL: libMad.so has a NEEDED on libunwind" >&2; exit 1
           fi
           if find build/install -name 'libunwind*' | grep -q .; then
-            echo "FAIL: libunwind made it into the install tree:"
-            find build/install -name 'libunwind*'
+            echo "FAIL: libunwind made it into the install tree:" >&2
+            find build/install -name 'libunwind*' >&2
             exit 1
           fi
 
