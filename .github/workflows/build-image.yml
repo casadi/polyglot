@@ -1,0 +1,83 @@
+name: build manylinux_2_28-aarch64-polyglot
+
+on:
+  push:
+    branches: [docker-manylinux_2_28-aarch64]
+    paths:
+      - Dockerfile
+      - scripts/**
+      - .github/workflows/build-image.yml
+  workflow_dispatch:
+    inputs:
+      julia_version:
+        description: Julia version to bake in
+        required: false
+        default: "1.12.6"
+      push:
+        description: Push the resulting image to ghcr.io (false = build-only)
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/manylinux_2_28-aarch64-polyglot
+  # PyPA upstream — a NATIVE aarch64 image (runs on aarch64 hosts). The
+  # jgillis/dockcross manylinux_2_28-aarch64 variant is cross-from-x64
+  # (its manifest is actually amd64) and exec-format-errors on ARM runners.
+  BASE_IMAGE: quay.io/pypa/manylinux_2_28_aarch64:latest
+  TARGET_ARCH: aarch64
+  BUILD_JOBS: 1
+
+jobs:
+  build:
+    # GitHub-hosted ARM runner — needed for a native ARM Julia source build.
+    # QEMU emulation of LLVM compile on an x86 runner is impractical (hours
+    # and likely OOM). If `ubuntu-24.04-arm` isn't yet available to the
+    # casadi org, swap for a self-hosted ARM runner.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve tags
+        id: tags
+        run: |
+          JULIA_VERSION="${{ github.event.inputs.julia_version || '1.12.6' }}"
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          {
+            echo "julia_version=${JULIA_VERSION}"
+            echo "tag_prod=${{ env.IMAGE }}:production"
+            echo "tag_sha=${{ env.IMAGE }}:${SHA}"
+            echo "tag_jl=${{ env.IMAGE }}:julia${JULIA_VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build (and conditionally push) image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_IMAGE }}
+            TARGET_ARCH=${{ env.TARGET_ARCH }}
+            JULIA_VERSION=${{ steps.tags.outputs.julia_version }}
+            BUILD_JOBS=${{ env.BUILD_JOBS }}
+          push: ${{ github.event.inputs.push != 'false' }}
+          tags: |
+            ${{ steps.tags.outputs.tag_prod }}
+            ${{ steps.tags.outputs.tag_sha }}
+            ${{ steps.tags.outputs.tag_jl }}
+          cache-from: type=gha,scope=manylinux_2_28-aarch64-polyglot
+          cache-to: type=gha,scope=manylinux_2_28-aarch64-polyglot,mode=max
+          provenance: false
