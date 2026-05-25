@@ -1,0 +1,56 @@
+name: smoketest push permissions
+
+# Cheap permission check: for each polyglot variant, pull the base image,
+# retag it under the target ghcr.io/casadi/...-polyglot package name with
+# a `:smoketest` tag, and push. Confirms `packages: write` works for the
+# package paths we'll push real images to — without spending the 3-4h
+# the actual Julia source-build takes.
+#
+# Run via Actions tab → "smoketest push permissions" → Run workflow.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  smoketest:
+    name: ${{ matrix.target_name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_name: manylinux_2_28-x64-polyglot
+            base_image: ghcr.io/jgillis/manylinux_2_28-x64:production
+          - target_name: manylinux_2_28-aarch64-polyglot
+            base_image: quay.io/pypa/manylinux_2_28_aarch64:latest
+          - target_name: windows-shared-x64-posix-polyglot
+            base_image: dockcross/windows-shared-x64-posix:latest
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull base
+        run: docker pull "${{ matrix.base_image }}"
+
+      - name: Retag + push as :smoketest
+        run: |
+          TARGET=ghcr.io/${{ github.repository_owner }}/${{ matrix.target_name }}:smoketest
+          docker tag "${{ matrix.base_image }}" "$TARGET"
+          docker push "$TARGET"
+          echo "::notice::pushed $TARGET (re-tag of ${{ matrix.base_image }})"
+
+      - name: Verify push round-trips (pull what we just pushed)
+        run: |
+          TARGET=ghcr.io/${{ github.repository_owner }}/${{ matrix.target_name }}:smoketest
+          docker rmi "$TARGET" 2>/dev/null || true
+          docker pull "$TARGET"
+          echo "::notice::round-trip OK for $TARGET"
