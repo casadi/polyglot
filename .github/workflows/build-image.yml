@@ -106,7 +106,7 @@ jobs:
             --change 'ENV PATH=/opt/julia/bin:/opt/rustup/cargo/bin:/opt/rh/gcc-toolset-14/root/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
             --change 'ENV CARGO_BUILD_TARGET=${{ env.JULIA_TARGET_ARCH }}-unknown-linux-gnu' \
             --change 'WORKDIR /work' \
-            --change 'LABEL org.opencontainers.image.title=manylinux_2_28 polyglot (Julia + Rust + C/C++)' \
+            --change 'LABEL org.opencontainers.image.title="manylinux_2_28 polyglot (Julia + Rust + C/C++)"' \
             --change 'LABEL org.opencontainers.image.source=https://github.com/${{ github.repository }}' \
             --change 'LABEL casadi.polyglot.julia.version=${{ steps.tags.outputs.julia_version }}' \
             --change 'LABEL casadi.polyglot.arch=${{ env.JULIA_TARGET_ARCH }}' \
