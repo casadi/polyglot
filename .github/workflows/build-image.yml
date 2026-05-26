@@ -4,7 +4,6 @@ on:
   push:
     branches: [docker-manylinux_2_28-x64]
     paths:
-      - Dockerfile
       - scripts/**
       - .github/workflows/build-image.yml
   workflow_dispatch:
@@ -31,23 +30,34 @@ concurrency:
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/manylinux_2_28-x64-polyglot
   BASE_IMAGE: ghcr.io/jgillis/manylinux_2_28-x64:production
-  TARGET_ARCH: x86_64
-  # BUILD_JOBS=1 to bypass the BuildKit `docker build` + parallel-make race
-  # in Julia's deps phase (`gcc: error: x86_64: linker input file not found`
-  # from configure scripts under -j>1). ~25 min deps phase vs ~12 with -j4.
-  BUILD_JOBS: 1
+  JULIA_TARGET_ARCH: x86_64
+  # Local proven build runs at -j6 in ~78 min. GitHub-hosted ubuntu-latest is
+  # 4-core/16 GB; -j4 keeps LLVM linking under the OOM line and matches the
+  # build-julia.sh default. Going lower trades wall time for nothing.
+  BUILD_JOBS: 4
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+
+      - name: Free up disk space
+        # ubuntu-latest ships ~14 GB free; LLVM build + container layers easily
+        # push past that. Strip the largest known-unused payloads up front.
+        run: |
+          set -eux
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h /
 
       - name: Resolve tags
         id: tags
@@ -61,21 +71,72 @@ jobs:
             echo "tag_jl=${{ env.IMAGE }}:julia${JULIA_VERSION}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build (and conditionally push) image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          build-args: |
-            BASE_IMAGE=${{ env.BASE_IMAGE }}
-            TARGET_ARCH=${{ env.TARGET_ARCH }}
-            JULIA_VERSION=${{ steps.tags.outputs.julia_version }}
-            BUILD_JOBS=${{ env.BUILD_JOBS }}
-          push: ${{ github.event.inputs.push != 'false' }}
-          tags: |
-            ${{ steps.tags.outputs.tag_prod }}
-            ${{ steps.tags.outputs.tag_sha }}
-            ${{ steps.tags.outputs.tag_jl }}
-          cache-from: type=gha,scope=manylinux_2_28-x64-polyglot
-          cache-to: type=gha,scope=manylinux_2_28-x64-polyglot,mode=max
-          provenance: false
+      - name: Pull base image
+        run: docker pull "$BASE_IMAGE"
+
+      - name: Build polyglot inside container (docker run)
+        # docker run + docker commit (NOT docker build). The multi-stage
+        # Dockerfile approach + BuildKit was fighting the same GNU make
+        # TARGET_ARCH name-collision bug that hit local builds, and gave
+        # confusing failures because BuildKit obscures the env. docker run
+        # is plain: same env contract as the proven local build script.
+        run: |
+          set -eux
+          docker run \
+            --name polyglot-build \
+            -v "$PWD/scripts:/work/scripts:ro" \
+            -e JULIA_VERSION="${{ steps.tags.outputs.julia_version }}" \
+            -e JULIA_TARGET_ARCH="${{ env.JULIA_TARGET_ARCH }}" \
+            -e BUILD_JOBS="${{ env.BUILD_JOBS }}" \
+            "$BASE_IMAGE" \
+            bash /work/scripts/run-in-container.sh
+
+      - name: Commit container into polyglot image
+        # Bake metadata (ENV, WORKDIR, LABEL) via --change since docker commit
+        # otherwise just snapshots the filesystem. Keep the base image's PATH
+        # and prepend /opt/julia/bin + /opt/rustup/cargo/bin.
+        run: |
+          set -eux
+          docker commit \
+            --change 'ENV JULIA_HOME=/opt/julia' \
+            --change 'ENV JULIA_PATH=/opt/julia' \
+            --change 'ENV JULIA_VERSION=${{ steps.tags.outputs.julia_version }}' \
+            --change 'ENV CARGO_HOME=/opt/rustup/cargo' \
+            --change 'ENV RUSTUP_HOME=/opt/rustup' \
+            --change 'ENV PATH=/opt/julia/bin:/opt/rustup/cargo/bin:/opt/rh/gcc-toolset-14/root/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+            --change 'ENV CARGO_BUILD_TARGET=${{ env.JULIA_TARGET_ARCH }}-unknown-linux-gnu' \
+            --change 'WORKDIR /work' \
+            --change 'LABEL org.opencontainers.image.title=manylinux_2_28 polyglot (Julia + Rust + C/C++)' \
+            --change 'LABEL org.opencontainers.image.source=https://github.com/${{ github.repository }}' \
+            --change 'LABEL casadi.polyglot.julia.version=${{ steps.tags.outputs.julia_version }}' \
+            --change 'LABEL casadi.polyglot.arch=${{ env.JULIA_TARGET_ARCH }}' \
+            polyglot-build \
+            "${{ steps.tags.outputs.tag_prod }}"
+          docker tag "${{ steps.tags.outputs.tag_prod }}" "${{ steps.tags.outputs.tag_sha }}"
+          docker tag "${{ steps.tags.outputs.tag_prod }}" "${{ steps.tags.outputs.tag_jl }}"
+
+      - name: Smoketest committed image
+        run: |
+          set -eux
+          docker run --rm "${{ steps.tags.outputs.tag_prod }}" bash -lc '
+            set -e
+            julia --version
+            julia -e "println(\"Julia \", VERSION, \" — LLVM \", Base.libllvm_version, \" — CPU \", Sys.CPU_NAME)"
+            rustc --version
+            cargo --version
+            cbindgen --version
+            test ! -e /opt/julia/lib/libunwind.so
+            echo "polyglot post-commit OK"
+          '
+
+      - name: Push (conditional)
+        if: github.event_name == 'push' || github.event.inputs.push != 'false'
+        run: |
+          set -eux
+          docker push "${{ steps.tags.outputs.tag_prod }}"
+          docker push "${{ steps.tags.outputs.tag_sha }}"
+          docker push "${{ steps.tags.outputs.tag_jl }}"
+
+      - name: Cleanup builder container
+        if: always()
+        run: docker rm -f polyglot-build 2>/dev/null || true
