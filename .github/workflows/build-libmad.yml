@@ -16,10 +16,6 @@ on:
         description: libMad branch / tag / sha
         required: false
         default: claude/ubuntu-manylinux-2-28-kLLSc
-  schedule:
-    # Weekly rebuild against latest polyglot image, in case upstream libMad
-    # deps drift. Delete if not wanted.
-    - cron: "17 4 * * 1"
 
 permissions:
   contents: read
