@@ -44,11 +44,17 @@ JULIA_TARGET_ARCH="$JULIA_TARGET_ARCH" BUILD_JOBS="$BUILD_JOBS" \
 
 echo
 echo "=== Move julia install into /opt/julia ==="
+# build-julia.sh left us inside /build/julia-${JULIA_VERSION}. Step out before
+# the rm-rf below, otherwise subsequent subshells inherit a deleted cwd and
+# fail with "getcwd: No such file or directory" / "Unable to proceed. Could
+# not locate working directory.".
+cd /
 mv "/build/julia-${JULIA_VERSION}/usr" /opt/julia
 # Strip everything else — sources, srccache, scratch, intermediate artifacts.
 # Leaves /opt/julia as the only thing committed into the final image.
 rm -rf "/build/julia-${JULIA_VERSION}" /build/*.tar.gz
 rmdir /build 2>/dev/null || true
+cd /
 
 echo
 echo "=== Install Rust + cbindgen (idempotent: skips if already present) ==="
