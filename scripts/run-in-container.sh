@@ -70,7 +70,11 @@ echo
 echo "=== Drop cargo profile shim into /etc/profile.d ==="
 UP=$(echo "${JULIA_TARGET_ARCH}_unknown_linux_gnu" | tr '[:lower:]' '[:upper:]')
 GCC=$( command -v "${CC:-gcc}" 2>/dev/null || command -v gcc )
-printf 'export CARGO_TARGET_%s_LINKER=%s\nexport CARGO_TARGET_%s_RUSTFLAGS=-C prefer-dynamic\n' \
+# Quote the multi-token RUSTFLAGS value — without quotes the file expands to
+# `export VAR=-C prefer-dynamic` which bash parses as two args (VAR=-C and
+# prefer-dynamic) and complains: "export: 'prefer-dynamic': not a valid
+# identifier".
+printf 'export CARGO_TARGET_%s_LINKER=%s\nexport CARGO_TARGET_%s_RUSTFLAGS="-C prefer-dynamic"\n' \
     "$UP" "$GCC" "$UP" > /etc/profile.d/polyglot-cargo.sh
 
 echo
