@@ -79,7 +79,14 @@ printf 'export CARGO_TARGET_%s_LINKER=%s\nexport CARGO_TARGET_%s_RUSTFLAGS="-C p
 
 echo
 echo "=== In-container smoketest ==="
-export PATH=/opt/julia/bin:/opt/rustup/cargo/bin:$PATH
+# Some base images (pypa manylinux) don't pre-export RUSTUP_HOME / CARGO_HOME,
+# so the rustup proxy binaries at /opt/rustup/cargo/bin can't find their config
+# and fail with "rustup could not choose a version of rustc to run". The
+# /usr/local/bin shims install-rust.sh drops do export those, but only when
+# invoked through them. Belt-and-braces: export here too, and keep
+# /usr/local/bin ahead of /opt/rustup/cargo/bin in PATH so the shims win.
+export RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/rustup/cargo
+export PATH=/opt/julia/bin:/usr/local/bin:/opt/rustup/cargo/bin:$PATH
 julia --version
 julia -e 'println("Julia ", VERSION, " — LLVM ", Base.libllvm_version, " — CPU ", Sys.CPU_NAME)'
 rustc --version
