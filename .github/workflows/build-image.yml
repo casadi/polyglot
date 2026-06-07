@@ -122,6 +122,7 @@ jobs:
             set -e
             julia --version
             julia -e "println(\"Julia \", VERSION, \" — LLVM \", Base.libllvm_version, \" — CPU \", Sys.CPU_NAME)"
+            julia -e "using Pkg, LinearAlgebra, Random; println(\"stdlib loadable: Pkg \", pkgversion(Pkg))"
             rustc --version
             cargo --version
             cbindgen --version
@@ -140,4 +141,3 @@ jobs:
       - name: Cleanup builder container
         if: always()
         run: docker rm -f polyglot-build 2>/dev/null || true
-
