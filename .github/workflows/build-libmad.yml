@@ -73,6 +73,22 @@ jobs:
         with:
           path: polyglot
 
+      - name: Add 16G swap (aarch64 OOM mitigation)
+        # ubuntu-24.04-arm ships ~0 swap and 16 GB RAM. The juliac AOT
+        # compile of MadNLP+CUDA pulls past that ceiling and the runner gets
+        # OOM-killed mid-step, leaving the GitHub job in a zombie state
+        # until heartbeat timeout (~68 min). Adding a 16 GB swap file lets
+        # the compile spill rather than die — slower, but completes.
+        if: matrix.arch == 'aarch64'
+        run: |
+          set -eux
+          free -m
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -m
+
       - name: Build libMad inside polyglot image
         run: |
           set -euxo pipefail
