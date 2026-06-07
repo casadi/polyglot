@@ -43,6 +43,30 @@ JULIA_TARGET_ARCH="$JULIA_TARGET_ARCH" BUILD_JOBS="$BUILD_JOBS" \
   /work/scripts/build-julia.sh "/build/julia-${JULIA_VERSION}"
 
 echo
+echo "=== Materialize stdlib symlinks ==="
+# Julia's in-source-tree `usr/` install layout symlinks each stdlib package
+# to its source tree at /build/julia-X.Y.Z/stdlib/<Name>[-<hash>]. After we
+# rm-rf the source tree below, those become dangling and `using Pkg` /
+# `using LinearAlgebra` / etc. fail with `Package X not found in current
+# path` — even though `julia --version` still works (sysimage-backed).
+# Replace each stdlib symlink with its dereferenced content so /opt/julia
+# is fully self-contained post-move.
+STDLIB_DIR="/build/julia-${JULIA_VERSION}/usr/share/julia/stdlib"
+for verdir in "$STDLIB_DIR"/v*; do
+  [ -d "$verdir" ] || continue
+  cd "$verdir"
+  for d in *; do
+    if [ -L "$d" ]; then
+      tgt=$(readlink -f "$d")
+      if [ -d "$tgt" ]; then
+        rm "$d"
+        cp -a "$tgt" "$d"
+      fi
+    fi
+  done
+done
+
+echo
 echo "=== Move julia install into /opt/julia ==="
 # build-julia.sh left us inside /build/julia-${JULIA_VERSION}. Step out before
 # the rm-rf below, otherwise subsequent subshells inherit a deleted cwd and
@@ -79,16 +103,19 @@ printf 'export CARGO_TARGET_%s_LINKER=%s\nexport CARGO_TARGET_%s_RUSTFLAGS="-C p
 
 echo
 echo "=== In-container smoketest ==="
-# Some base images (pypa manylinux) don't pre-export RUSTUP_HOME / CARGO_HOME,
-# so the rustup proxy binaries at /opt/rustup/cargo/bin can't find their config
-# and fail with "rustup could not choose a version of rustc to run". The
-# /usr/local/bin shims install-rust.sh drops do export those, but only when
-# invoked through them. Belt-and-braces: export here too, and keep
-# /usr/local/bin ahead of /opt/rustup/cargo/bin in PATH so the shims win.
+# Some base images (pypa manylinux aarch64) don't pre-export RUSTUP_HOME /
+# CARGO_HOME, so the rustup-proxy binaries at /opt/rustup/cargo/bin can't
+# locate their config and fail with "rustup could not choose a version of
+# rustc to run". The /usr/local/bin shims install-rust.sh drops do export
+# them, but only when invoked through them. Belt-and-braces: export here,
+# and put /usr/local/bin ahead of /opt/rustup/cargo/bin so the shims win.
 export RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/rustup/cargo
 export PATH=/opt/julia/bin:/usr/local/bin:/opt/rustup/cargo/bin:$PATH
 julia --version
 julia -e 'println("Julia ", VERSION, " — LLVM ", Base.libllvm_version, " — CPU ", Sys.CPU_NAME)'
+# Exercise stdlib loading — catches dangling symlink regressions like
+# the one that shipped before stdlib materialization was added below.
+julia -e 'using Pkg, LinearAlgebra, Random; println("stdlib loadable: Pkg ", pkgversion(Pkg))'
 rustc --version
 cargo --version
 cbindgen --version
