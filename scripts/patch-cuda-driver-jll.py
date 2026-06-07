@@ -11,7 +11,9 @@ the behaviour stick regardless of preferences or env.
 Run after `Pkg.instantiate()` (which downloads CUDA_Driver_jll) and before
 juliac compiles the final shared library. Idempotent.
 """
-from __future__ import annotations
+# NB: don't add `from __future__ import annotations` here — manylinux_2_28
+# base image's `/usr/bin/python3` is 3.6.8, which predates that feature.
+# The script doesn't use PEP-563 annotations anyway.
 import glob, os, re, sys
 
 depot = os.environ.get("JULIA_DEPOT_PATH")
