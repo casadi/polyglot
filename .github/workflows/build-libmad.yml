@@ -16,6 +16,10 @@ on:
         description: libMad branch / tag / sha
         required: false
         default: claude/ubuntu-manylinux-2-28-kLLSc
+  schedule:
+    # Weekly rebuild against latest polyglot image, in case upstream libMad
+    # deps drift. Delete if not wanted.
+    - cron: "17 4 * * 1"
 
 permissions:
   contents: read
@@ -71,8 +75,11 @@ jobs:
 
       - name: Build libMad inside polyglot image
         run: |
-          set -eux
+          set -euxo pipefail
           mkdir -p build out
+          # Tee output to a file so a runner-side log-stream death (which is
+          # what aarch64 has been hitting at the long juliac AOT step) still
+          # leaves a forensics trail we can upload as an artifact.
           docker run --rm \
             -v "$PWD/libMad:/work/libMad:ro" \
             -v "$PWD/polyglot/scripts:/work/scripts:ro" \
@@ -80,7 +87,15 @@ jobs:
             -v "$PWD/out:/work/out" \
             -e JULIA_PKG_USE_CLI_GIT=true \
             "$POLYGLOT_IMAGE" \
-            bash /work/scripts/build-libmad.sh
+            bash /work/scripts/build-libmad.sh 2>&1 | tee build/libmad-build.log
+
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libmad-build-log-${{ matrix.arch }}
+          path: build/libmad-build.log
+          if-no-files-found: warn
 
       - name: Inspect libMad.so manylinux compliance
         run: |
