@@ -43,27 +43,35 @@ JULIA_TARGET_ARCH="$JULIA_TARGET_ARCH" BUILD_JOBS="$BUILD_JOBS" \
   /work/scripts/build-julia.sh "/build/julia-${JULIA_VERSION}"
 
 echo
-echo "=== Materialize stdlib symlinks ==="
-# Julia's in-source-tree `usr/` install layout symlinks each stdlib package
-# to its source tree at /build/julia-X.Y.Z/stdlib/<Name>[-<hash>]. After we
-# rm-rf the source tree below, those become dangling and `using Pkg` /
-# `using LinearAlgebra` / etc. fail with `Package X not found in current
-# path` — even though `julia --version` still works (sysimage-backed).
-# Replace each stdlib symlink with its dereferenced content so /opt/julia
-# is fully self-contained post-move.
-STDLIB_DIR="/build/julia-${JULIA_VERSION}/usr/share/julia/stdlib"
-for verdir in "$STDLIB_DIR"/v*; do
-  [ -d "$verdir" ] || continue
-  cd "$verdir"
-  for d in *; do
-    if [ -L "$d" ]; then
-      tgt=$(readlink -f "$d")
-      if [ -d "$tgt" ]; then
-        rm "$d"
-        cp -a "$tgt" "$d"
-      fi
-    fi
-  done
+echo "=== Materialize share/julia symlinks ==="
+# Julia's in-source-tree `usr/` install layout symlinks every stdlib package
+# AND several top-level dirs (test/, base/, Compiler/) back to the source
+# tree at /build/julia-X.Y.Z/{stdlib,test,base,Compiler,deps/scratch/...}.
+# After we rm-rf the source tree below, those dangle, and:
+#   - `using Pkg` / `using LinearAlgebra` fail with "Package X not found".
+#   - REPL precompile fails at `include("test/testhelpers/FakePTYs.jl")`.
+#   - Stack traces lose source-line info from base/.
+# Some symlinks (e.g. base/JuliaSyntax → deps/scratch/JuliaSyntax-<hash>)
+# are themselves children of other symlinked dirs; materializing the
+# parent surfaces these nested ones, so iterate until stable. Only
+# follow symlinks whose target lies OUTSIDE the install tree (the
+# only ones that go dangling when /build is wiped); leave internal
+# relative symlinks alone so packages with their own layout still work.
+SJ="/build/julia-${JULIA_VERSION}/usr/share/julia"
+INSTALL_ROOT="/build/julia-${JULIA_VERSION}/usr"
+while :; do
+  did_one=0
+  while IFS= read -r link; do
+    tgt=$(readlink -f "$link") || continue
+    case "$tgt" in
+      "$INSTALL_ROOT"/*) continue ;;
+    esac
+    [ -e "$tgt" ] || continue
+    rm "$link"
+    cp -a "$tgt" "$link"
+    did_one=1
+  done < <(find "$SJ" -type l)
+  [ "$did_one" = 0 ] && break
 done
 
 echo
