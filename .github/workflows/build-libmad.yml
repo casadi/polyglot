@@ -74,20 +74,24 @@ jobs:
           path: polyglot
 
       - name: Add 16G swap (aarch64 OOM mitigation)
-        # ubuntu-24.04-arm ships ~0 swap and 16 GB RAM. The juliac AOT
-        # compile of MadNLP+CUDA pulls past that ceiling and the runner gets
+        # ubuntu-24.04-arm ships only 3 GB swap + 16 GB RAM. The juliac AOT
+        # compile of MadNLP+CUDA blows past that ceiling and the runner gets
         # OOM-killed mid-step, leaving the GitHub job in a zombie state
-        # until heartbeat timeout (~68 min). Adding a 16 GB swap file lets
-        # the compile spill rather than die — slower, but completes.
+        # until heartbeat timeout (~68 min). Add a separate 16 GB swap file
+        # under /mnt (the runner's larger ephemeral volume) so the compile
+        # spills rather than dies. Don't touch the existing /swapfile —
+        # fallocate on it fails with "Text file busy" since it's active.
         if: matrix.arch == 'aarch64'
         run: |
           set -eux
-          free -m
-          sudo fallocate -l 16G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -m
+          free -h
+          df -h /mnt /
+          sudo fallocate -l 16G /mnt/polyglot-swapfile
+          sudo chmod 600 /mnt/polyglot-swapfile
+          sudo mkswap /mnt/polyglot-swapfile
+          sudo swapon /mnt/polyglot-swapfile
+          free -h
+          swapon --show
 
       - name: Build libMad inside polyglot image
         run: |
