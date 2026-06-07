@@ -7,18 +7,25 @@
 #                                    into src/{signals-unix.c,stackwalk.c}
 #
 # Args: $1 = path to extracted Julia source tree (containing Make.inc)
-# Env:  TARGET_ARCH  (x86_64 | aarch64)   — defaults to native
+# Env:  JULIA_TARGET_ARCH  (x86_64 | aarch64)   — defaults to native
 #       BUILD_JOBS                         — make parallelism (default 4)
 set -euo pipefail
 SRC="${1:?Julia source tree path required}"
-TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
+JULIA_TARGET_ARCH="${JULIA_TARGET_ARCH:-$(uname -m)}"
 BUILD_JOBS="${BUILD_JOBS:-4}"
+
+# GNU make's built-in implicit recipe for `%.o: %.c` is
+#   $(CC) $(CFLAGS) $(CPPFLAGS) $(TARGET_ARCH) -c $<
+# so an inherited TARGET_ARCH env var (e.g. "x86_64") leaks in as a positional
+# gcc arg via Julia's sub-makes (libwhich, OpenBLAS, ...), failing with
+# `gcc: error: x86_64: linker input file not found`. Strip it defensively.
+unset TARGET_ARCH
 
 cd "$SRC"
 
 # JULIA_CPU_TARGET — multi-target string matching JuliaCI's official binary
 # builds (utilities/build_envs.sh).
-case "$TARGET_ARCH" in
+case "$JULIA_TARGET_ARCH" in
   x86_64)
     JULIA_CPU_TARGET="generic;sandybridge,-xsaveopt,clone_all;haswell,-rdrnd,base(1);x86-64-v4,-rdrnd,base(1)"
     ;;
@@ -27,7 +34,7 @@ case "$TARGET_ARCH" in
     JULIA_CPU_TARGET="generic"
     ;;
   *)
-    echo "Unsupported TARGET_ARCH=$TARGET_ARCH" >&2; exit 1
+    echo "Unsupported JULIA_TARGET_ARCH=$JULIA_TARGET_ARCH" >&2; exit 1
     ;;
 esac
 
@@ -36,18 +43,6 @@ USE_BINARYBUILDER=0
 JULIA_CPU_TARGET=${JULIA_CPU_TARGET}
 DISABLE_LIBUNWIND:=1
 EOF
-# HOSTCC must be a single token. Make.inc line 445 unconditionally does
-# `HOSTCC = \$(CC)` which then gets `-m\$(BINARY)` appended → HOSTCC becomes
-# the two-word "gcc -m64". libwhich.mk's recipe `\$(MAKE) -C scratch/...
-# CC="\$(HOSTCC)" libwhich` then expands to `make ... CC="gcc -m64" libwhich`.
-# Under BuildKit's docker build with -j>1, the sub-make's MAKEFLAGS-driven
-# re-tokenization splits this and a stray ARCH token ("x86_64" or "aarch64")
-# leaks in as a positional arg to gcc — `gcc: error: x86_64: linker input
-# file not found`. Setting HOSTCC in Make.user does NOT work because line
-# 445 overwrites it. The fix is to pass HOSTCC/HOSTCXX on the make command
-# line so they win over makefile assignments.
-MAKE_VARS=(HOSTCC=gcc HOSTCXX=g++)
-
 echo "=== Make.user ==="
 cat Make.user
 echo
@@ -137,7 +132,7 @@ echo
 
 echo "=== Build ==="
 date
-time make -j"$BUILD_JOBS" "${MAKE_VARS[@]}"
+time make -j"$BUILD_JOBS"
 date
 echo
 
