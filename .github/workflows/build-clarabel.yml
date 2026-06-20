@@ -1,0 +1,142 @@
+name: build clarabel bundle
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-clarabel.yml
+      - scripts/build-clarabel.sh
+  workflow_dispatch:
+    inputs:
+      clarabel_repo:
+        description: Clarabel.cpp repo (owner/name)
+        required: false
+        default: jgillis/Clarabel.cpp
+      clarabel_ref:
+        description: Clarabel.cpp branch / tag / sha
+        required: false
+        default: d6f2404903db791330f88b4f2ceded1e90696848
+  schedule:
+    # Weekly rebuild against latest polyglot image.
+    - cron: "37 4 * * 1"
+
+permissions:
+  contents: write
+  packages: read
+
+concurrency:
+  group: clarabel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: clarabel ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            polyglot_image: ghcr.io/${{ github.repository_owner }}/manylinux_2_28-x64-polyglot:production
+            runner: ubuntu-latest
+          - arch: aarch64
+            polyglot_image: ghcr.io/${{ github.repository_owner }}/manylinux_2_28-aarch64-polyglot:production
+            runner: ubuntu-24.04-arm
+
+    env:
+      CLARABEL_REPO: ${{ github.event.inputs.clarabel_repo || 'jgillis/Clarabel.cpp' }}
+      CLARABEL_REF: ${{ github.event.inputs.clarabel_ref || 'd6f2404903db791330f88b4f2ceded1e90696848' }}
+      POLYGLOT_IMAGE: ${{ matrix.polyglot_image }}
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull polyglot image
+        run: docker pull "$POLYGLOT_IMAGE"
+
+      - name: Checkout Clarabel.cpp (with submodules)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CLARABEL_REPO }}
+          ref: ${{ env.CLARABEL_REF }}
+          path: clarabel
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Checkout this repo (for scripts/)
+        uses: actions/checkout@v4
+        with:
+          path: polyglot
+
+      - name: Build clarabel inside polyglot image
+        run: |
+          set -euxo pipefail
+          mkdir -p build out
+          docker run --rm \
+            -v "$PWD/clarabel:/work/clarabel:ro" \
+            -v "$PWD/polyglot/scripts:/work/scripts:ro" \
+            -v "$PWD/build:/work/build" \
+            -v "$PWD/out:/work/out" \
+            "$POLYGLOT_IMAGE" \
+            bash /work/scripts/build-clarabel.sh 2>&1 | tee build/clarabel-build.log
+
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clarabel-build-log-${{ matrix.arch }}
+          path: build/clarabel-build.log
+          if-no-files-found: warn
+
+      - name: Inspect libclarabel_c.so manylinux compliance
+        run: |
+          set -e
+          SO=$(find build/install -name 'libclarabel_c.so*' -type f | head -1)
+          test -n "$SO"
+          echo "=== $SO ==="
+          file "$SO"
+          echo "=== SONAME ==="; objdump -p "$SO" | grep SONAME || true
+          echo "=== NEEDED ==="; objdump -p "$SO" | grep NEEDED
+          echo "=== required GLIBC ==="; objdump -T "$SO" | grep -oE 'GLIBC_[0-9.]+' | sort -Vu
+
+      - name: Upload clarabel bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: clarabel-${{ matrix.arch }}
+          path: out/clarabel-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  # Rolling release: refresh the `evergreen` tag's clarabel-* assets (shared
+  # with the libMad bundles; only same-named assets are clobbered).
+  publish:
+    name: publish evergreen release
+    needs: build
+    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built bundles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: clarabel-*
+          path: dist
+          merge-multiple: true
+
+      - name: List bundles
+        run: |
+          ls -lhR dist
+          test -n "$(find dist -name 'clarabel-*.tar.gz' -print -quit)" \
+            || { echo "no bundles to publish" >&2; exit 1; }
+
+      - name: Publish to rolling 'evergreen' release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: evergreen
+          files: dist/clarabel-*.tar.gz
+          make_latest: true
