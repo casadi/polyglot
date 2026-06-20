@@ -78,7 +78,7 @@ jobs:
           set -euxo pipefail
           mkdir -p build out
           docker run --rm \
-            -v "$PWD/clarabel:/work/clarabel:ro" \
+            -v "$PWD/clarabel:/work/clarabel" \
             -v "$PWD/polyglot/scripts:/work/scripts:ro" \
             -v "$PWD/build:/work/build" \
             -v "$PWD/out:/work/out" \

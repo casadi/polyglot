@@ -2,7 +2,7 @@
 # Build the real Clarabel C library (Clarabel.cpp -> Rust crate via cargo +
 # cbindgen) inside the polyglot image, producing a portable manylinux_2_28
 # libclarabel_c bundle. Bind-mounts expected:
-#   /work/clarabel   Clarabel.cpp source (ro)
+#   /work/clarabel   Clarabel.cpp source (rw; cargo builds in-source: Cargo.lock, target/)
 #   /work/build      build + install (rw)
 #   /work/out        final tar.gz output (rw)
 # Env:
