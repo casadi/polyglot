@@ -22,7 +22,7 @@ on:
     - cron: "17 4 * * 1"
 
 permissions:
-  contents: read
+  contents: write
   packages: read
 
 concurrency:
@@ -143,3 +143,45 @@ jobs:
           name: libMad-${{ matrix.arch }}
           path: out/libMad-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
+
+  # Rolling release: every main build refreshes the `evergreen` tag's assets
+  # so commercial_solvers can pull a stable URL without version pinning.
+  # Runs even on partial success (if: always) so a green x64 still ships when
+  # the flakier aarch64 leg fails.
+  publish:
+    name: publish evergreen release
+    needs: build
+    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built bundles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: libMad-*
+          path: dist
+          merge-multiple: true
+
+      - name: List bundles
+        run: |
+          ls -lhR dist
+          test -n "$(find dist -name 'libMad-*.tar.gz' -print -quit)" \
+            || { echo "no bundles to publish" >&2; exit 1; }
+
+      - name: Publish to rolling 'evergreen' release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: evergreen
+          name: libMad rolling build (evergreen)
+          body: |
+            Rolling libMad bundle built by casadi/polyglot `main` CI in the
+            controlled manylinux_2_28 polyglot container.
+
+            - Source commit: ${{ github.sha }}
+            - Build run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Consumed by casadi/commercial_solvers. Assets are overwritten on
+            every main build; do not pin to this tag for reproducible builds.
+          files: dist/*.tar.gz
+          make_latest: true
