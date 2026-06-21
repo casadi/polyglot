@@ -1,11 +1,13 @@
 name: build macOS Julia toolchain (no libunwind)
 
 # Provider step (macOS analogue of the `docker` branch's image build).
-# Builds Julia FROM SOURCE with DISABLE_LIBUNWIND=1 (the official macOS binary
-# bundles libunwind, which clashes when libMad is loaded into a host that
-# already has one — the same "Matlab clash" the Linux build avoids). Bakes the
-# result + the juliac app into a relocatable tarball and publishes it to the
-# perennial `julia-macos` release, consumed by the `main` branch's libMad build.
+# Builds Julia FROM SOURCE with USE_SYSTEM_LIBUNWIND=1 so the bundle ships no
+# libunwind.dylib of its own (the official macOS binary bundles one, which
+# clashes when libMad is loaded into a host that already has one — the "Matlab
+# clash" the Linux build avoids via DISABLE_LIBUNWIND; that flag is unsupported
+# on macOS, and linking the always-present system unwinder is the equivalent).
+# Bakes the result + the juliac app into a relocatable tarball and publishes it
+# to the perennial `julia-macos` release, consumed by the `main` libMad build.
 
 on:
   push:
@@ -82,9 +84,9 @@ jobs:
           name: macOS arm64 Julia toolchain (julia-macos)
           body: |
             Relocatable Julia + juliac toolchain for the macOS arm64 libMad
-            build, built FROM SOURCE with DISABLE_LIBUNWIND=1 (no libunwind, to
-            avoid the Matlab/host clash). Provider artifact (no Docker on
-            macOS); consumed by the `main` branch's macOS libMad build.
+            build, built FROM SOURCE with USE_SYSTEM_LIBUNWIND=1 (ships no
+            libunwind.dylib, to avoid the Matlab/host clash). Provider artifact
+            (no Docker on macOS); consumed by the `main` macOS libMad build.
 
             - Julia version: ${{ env.JULIA_VERSION }}
             - USE_BINARYBUILDER: ${{ env.USE_BINARYBUILDER }}

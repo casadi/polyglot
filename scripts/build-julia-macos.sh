@@ -1,13 +1,16 @@
 #!/bin/bash
-# Build Julia from source on macOS arm64 with libunwind DISABLED, then bake it
-# (+ the JuliaC.jl `juliac` app) into a relocatable toolchain tarball consumed
-# by the `main` branch to build libMad. This is the macOS analogue of the
+# Build Julia from source on macOS arm64 WITHOUT bundling libunwind, then bake
+# it (+ the JuliaC.jl `juliac` app) into a relocatable toolchain tarball
+# consumed by the `main` branch to build libMad. macOS analogue of the
 # `docker` branch's scripts/build-julia.sh.
 #
-# Why from source: the official Julia macOS binary bundles libunwind, which
-# clashes when libMad is loaded into a host that already has one (the same
-# "Matlab clash" the Linux build avoids). DISABLE_LIBUNWIND=1 + the
-# JuliaLang/julia#61899 source patches produce a Julia with no libunwind.
+# Why from source: the official Julia macOS binary BUNDLES libunwind.dylib,
+# which clashes when libMad is loaded into a host that already has one (the
+# "Matlab clash" the Linux build avoids via DISABLE_LIBUNWIND). On macOS the
+# system unwinder is always present (libSystem), so USE_SYSTEM_LIBUNWIND=1 is
+# the supported equivalent: Julia links the system libunwind and bundles none.
+# (DISABLE_LIBUNWIND itself is unsupported on macOS — signals-mach.c hard-wires
+# libunwind with no JL_DISABLE_LIBUNWIND guards.)
 #
 # Env:
 #   JULIA_VERSION     Julia version to build         (default: 1.12.6)
@@ -69,64 +72,19 @@ mkdir -p "$WORK/src"
 tar -xzf "$WORK/julia-src.tar.gz" -C "$WORK/src" --strip-components=1
 cd "$WORK/src"
 
-echo "=== 2) Make.user (DISABLE_LIBUNWIND) ==="
+echo "=== 2) Make.user (USE_SYSTEM_LIBUNWIND) ==="
 cat > Make.user <<EOF
 USE_BINARYBUILDER=${USE_BINARYBUILDER}
 JULIA_CPU_TARGET=${JULIA_CPU_TARGET}
-DISABLE_LIBUNWIND:=1
+# Link macOS's system unwinder (always in libSystem) instead of building +
+# bundling LLVMLibUnwind, so the bundle ships no libunwind.dylib (the Matlab
+# clash fix). DISABLE_LIBUNWIND is unsupported on macOS (signals-mach.c).
+USE_SYSTEM_LIBUNWIND:=1
 # macOS always ships system zlib; building it from source gave LLVM's bootstrap
 # tablegen tools an unresolvable @rpath/libz.dylib. zlib isn't parity-sensitive.
 USE_SYSTEM_ZLIB:=1
 EOF
 cat Make.user
-echo
-
-echo "=== 3) apply DISABLE_LIBUNWIND fix (JuliaLang/julia#61899) ==="
-python3 <<'PY'
-import sys
-# Patch 1 — signals-unix.c: declare signal_bt_data/_size outside the libunwind
-# guard so signal_listener (which uses them unconditionally) always links.
-p = 'src/signals-unix.c'
-s = open(p).read()
-needle = ('#if !defined(JL_DISABLE_LIBUNWIND)\n\n'
-          'static jl_bt_element_t signal_bt_data[JL_MAX_BT_SIZE + 1];\n'
-          'static size_t signal_bt_size = 0;\n')
-replacement = (
-    '// polyglot patch (also JuliaLang/julia#61899): declare these\n'
-    '// unconditionally — signal_listener uses them outside any libunwind guard.\n'
-    'static jl_bt_element_t signal_bt_data[JL_MAX_BT_SIZE + 1];\n'
-    'static size_t signal_bt_size = 0;\n\n'
-    '#if !defined(JL_DISABLE_LIBUNWIND)\n\n'
-)
-if needle in s:
-    open(p, 'w').write(s.replace(needle, replacement, 1)); print(f'patched {p}')
-elif 'polyglot patch (also JuliaLang/julia#61899)' in s:
-    print(f'{p} already patched, skipping')
-else:
-    sys.exit(f'PATCH1 FAILED: needle not found in {p}')
-
-# Patch 2 — stackwalk.c: short-circuit jl_simulate_longjmp under
-# JL_DISABLE_LIBUNWIND (its body uses bt_context_t/uc_mcontext, absent then).
-p = 'src/stackwalk.c'
-s = open(p).read()
-needle = ('int jl_simulate_longjmp(jl_jmp_buf mctx, bt_context_t *c) JL_NOTSAFEPOINT\n'
-          '{\n'
-          '#if (defined(_COMPILER_ASAN_ENABLED_) || defined(_COMPILER_TSAN_ENABLED_))\n')
-replacement = (
-    'int jl_simulate_longjmp(jl_jmp_buf mctx, bt_context_t *c) JL_NOTSAFEPOINT\n'
-    '{\n'
-    '#if defined(JL_DISABLE_LIBUNWIND)\n'
-    '    (void)mctx; (void)c;\n'
-    '    return 0;\n'
-    '#elif (defined(_COMPILER_ASAN_ENABLED_) || defined(_COMPILER_TSAN_ENABLED_))\n'
-)
-if needle in s:
-    open(p, 'w').write(s.replace(needle, replacement, 1)); print(f'patched {p}')
-elif '#if defined(JL_DISABLE_LIBUNWIND)\n    (void)mctx; (void)c;' in s:
-    print(f'{p} already patched, skipping')
-else:
-    sys.exit(f'PATCH2 FAILED: needle not found in {p}')
-PY
 echo
 
 echo "=== 3b) fortran shim ==="
@@ -176,9 +134,11 @@ date
 echo "=== 5) smoke test ==="
 ./julia -e 'println("Julia ", VERSION, " — LLVM ", Base.libllvm_version); println("CPU ", Sys.CPU_NAME)'
 
-echo "=== 6) libunwind gate (usr/lib must have none) ==="
+echo "=== 6) libunwind gate (bundle must ship none) ==="
+# With USE_SYSTEM_LIBUNWIND=1 Julia links the system unwinder and installs no
+# libunwind.dylib of its own — that is the whole point (no Matlab clash).
 if compgen -G "usr/lib/libunwind*" > /dev/null || compgen -G "usr/lib/julia/libunwind*" > /dev/null; then
-  echo "ERROR: libunwind present despite DISABLE_LIBUNWIND=1" >&2
+  echo "ERROR: libunwind bundled despite USE_SYSTEM_LIBUNWIND=1" >&2
   ls usr/lib/libunwind* usr/lib/julia/libunwind* 2>/dev/null >&2
   exit 1
 fi
@@ -202,7 +162,8 @@ echo "=== 9) record metadata + tar ==="
 cat > "$BUNDLE_ROOT/TOOLCHAIN.txt" <<META
 julia_version=$JULIA_VERSION
 built_from_source=1
-disable_libunwind=1
+use_system_libunwind=1
+bundles_libunwind=0
 use_binarybuilder=$USE_BINARYBUILDER
 cpu_target=$JULIA_CPU_TARGET
 bundle_root=$BUNDLE_ROOT
