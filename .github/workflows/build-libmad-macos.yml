@@ -1,0 +1,160 @@
+name: build libMad bundle (macOS arm64)
+
+# Consumer step: build libMad natively on macos-14 using the Julia toolchain
+# provisioned by the `macos` branch (published to the `julia-macos` release).
+# Docker can't run on macOS runners, so this native build replaces the
+# container path that the Linux build-libmad.yml uses. Result ships to the
+# rolling `evergreen` release alongside the Linux bundles.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-libmad-macos.yml
+      - scripts/build-libmad-macos.sh
+      - scripts/patch-cuda-driver-jll.py
+  workflow_dispatch:
+    inputs:
+      libmad_repo:
+        description: libMad repo (owner/name)
+        required: false
+        default: jgillis/libMad
+      libmad_ref:
+        description: libMad branch / tag / sha
+        required: false
+        default: claude/ubuntu-manylinux-2-28-kLLSc
+  schedule:
+    # Weekly rebuild, staggered after the Linux libMad cron (17 4 * * 1).
+    - cron: "47 4 * * 1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: libmad-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: libMad osx-arm64
+    runs-on: macos-14
+    env:
+      LIBMAD_REPO: ${{ github.event.inputs.libmad_repo || 'jgillis/libMad' }}
+      LIBMAD_REF: ${{ github.event.inputs.libmad_ref || 'claude/ubuntu-manylinux-2-28-kLLSc' }}
+      BUNDLE_ROOT: ${{ github.workspace }}/polyglot-julia
+    steps:
+      - name: Set up compiler (casadi toolchain)
+        uses: casadi/action-setup-compiler@master
+        with:
+          cache-suffix: ''
+          target: arm64
+
+      - name: Fetch provisioned Julia toolchain (julia-macos release)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          gh release download julia-macos \
+            --repo ${{ github.repository }} \
+            --pattern 'julia-toolchain-osx-arm64.tar.gz' \
+            --output julia-toolchain.tar.gz
+          # Restores to $BUNDLE_ROOT (github.workspace/polyglot-julia) — the
+          # same absolute path the provider built at, so depot caches stay valid.
+          tar -xzf julia-toolchain.tar.gz -C "${{ github.workspace }}"
+          test -x "$BUNDLE_ROOT/julia/bin/julia"
+
+      - name: Checkout libMad
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.LIBMAD_REPO }}
+          ref: ${{ env.LIBMAD_REF }}
+          path: libMad
+          fetch-depth: 1
+
+      - name: Checkout this repo (for scripts/)
+        uses: actions/checkout@v4
+        with:
+          path: polyglot
+
+      - name: Build libMad
+        env:
+          SRC_DIR: ${{ github.workspace }}/libMad
+          BUILD_DIR: ${{ github.workspace }}/build
+          OUT_DIR: ${{ github.workspace }}/out
+          OSX_ARCH: arm64
+        run: |
+          set -euxo pipefail
+          cp polyglot/scripts/patch-cuda-driver-jll.py polyglot/scripts/build-libmad-macos.sh .
+          mkdir -p build out
+          bash build-libmad-macos.sh 2>&1 | tee build/libmad-build.log
+
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libmad-build-log-osx-arm64
+          path: build/libmad-build.log
+          if-no-files-found: warn
+
+      - name: Inspect libMad.dylib portability
+        run: |
+          set -e
+          DYLIB=$(find build/install -name 'libMad*.dylib' -type f | head -1)
+          test -n "$DYLIB"
+          echo "=== $DYLIB ==="
+          file "$DYLIB"
+          echo "=== arch ==="; lipo -archs "$DYLIB"
+          echo "=== load commands (otool -L) ==="; otool -L "$DYLIB"
+          if otool -L "$DYLIB" | grep -qE '\s/(opt/homebrew|usr/local/Cellar)'; then
+            echo "FAIL: libMad.dylib references a non-portable Homebrew path" >&2
+            otool -L "$DYLIB" | grep -E '\s/(opt/homebrew|usr/local/Cellar)' >&2
+            exit 1
+          fi
+
+      - name: Upload libMad bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: libMad-osx-arm64
+          path: out/libMad-osx-arm64.zip
+          if-no-files-found: error
+
+  # Refresh the rolling `evergreen` release with the macOS asset, alongside the
+  # Linux .tar.gz bundles. Asset name (libMad-osx-arm64.zip) can't collide.
+  publish:
+    name: publish evergreen release
+    needs: build
+    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built bundle
+        uses: actions/download-artifact@v4
+        with:
+          pattern: libMad-osx-*
+          path: dist
+          merge-multiple: true
+
+      - name: List bundles
+        run: |
+          ls -lhR dist
+          test -n "$(find dist -name 'libMad-osx-*.zip' -print -quit)" \
+            || { echo "no bundles to publish" >&2; exit 1; }
+
+      - name: Publish to rolling 'evergreen' release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: evergreen
+          name: libMad rolling build (evergreen)
+          body: |
+            Rolling libMad bundle. macOS arm64 leg built natively on macos-14
+            from the provisioned `julia-macos` toolchain (no container; Docker
+            is unavailable on macOS runners).
+
+            - Source commit: ${{ github.sha }}
+            - Build run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Consumed by casadi/commercial_solvers. Assets are overwritten on
+            every build; do not pin to this tag for reproducible builds.
+          files: dist/*.zip
+          make_latest: false
