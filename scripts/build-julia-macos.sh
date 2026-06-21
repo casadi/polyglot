@@ -115,9 +115,25 @@ else:
 PY
 echo
 
+echo "=== 3b) fortran shim ==="
+# Julia's Make.inc hardcodes `FC := gfortran` (bare name, := overrides env FC)
+# and probes `gfortran -dM -E -` for FC_VERSION; if the action-setup-compiler
+# gfortran isn't named exactly `gfortran` on PATH, FC_VERSION is empty and the
+# OpenBLAS/SuiteSparse source build aborts. Shim a bare `gfortran` -> real FC
+# (also fixes bare-gfortran calls inside those sub-builds) and pass FC=
+# explicitly on the make command line (beats the makefile := and propagates).
+FC_BIN="$(command -v "${FC:-gfortran}" || true)"
+test -n "$FC_BIN" || { echo "no gfortran found (FC=${FC:-<unset>})" >&2; exit 1; }
+mkdir -p "$WORK/fcbin"
+ln -sf "$FC_BIN" "$WORK/fcbin/gfortran"
+export PATH="$WORK/fcbin:$PATH"
+echo "  FC_BIN=$FC_BIN"
+gfortran -dM -E - < /dev/null | grep __GNUC__ \
+  || { echo "gfortran probe still failing" >&2; exit 1; }
+
 echo "=== 4) build (make -j$BUILD_JOBS) ==="
 date
-time make -j"$BUILD_JOBS"
+time make -j"$BUILD_JOBS" FC="$FC_BIN"
 date
 
 echo "=== 5) smoke test ==="
