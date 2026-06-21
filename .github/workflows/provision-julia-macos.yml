@@ -1,0 +1,72 @@
+name: provision macOS Julia toolchain
+
+# Provider step (macOS analogue of the `docker` branch's image build).
+# Docker can't run on macOS runners, so instead of a container image we bake a
+# relocatable Julia + juliac toolchain into a tarball and publish it to the
+# perennial `julia-macos` release. The `main` branch's macOS libMad build
+# consumes that tarball.
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - .github/workflows/provision-julia-macos.yml
+      - scripts/provision-julia-macos.sh
+  workflow_dispatch:
+    inputs:
+      julia_version:
+        description: Julia version to bake in
+        required: false
+        default: '1.12.6'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: provision-julia-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provision:
+    name: provision Julia osx-arm64
+    runs-on: macos-14
+    env:
+      JULIA_VERSION: ${{ github.event.inputs.julia_version || '1.12.6' }}
+      BUNDLE_ROOT: ${{ github.workspace }}/polyglot-julia
+      OUT_DIR: ${{ github.workspace }}/out
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Provision Julia toolchain
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          bash scripts/provision-julia-macos.sh 2>&1 | tee out/provision.log
+
+      - name: Upload toolchain tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: julia-toolchain-osx-arm64
+          path: out/julia-toolchain-osx-arm64.tar.gz
+          if-no-files-found: error
+
+      - name: Publish to perennial 'julia-macos' release
+        if: github.ref == 'refs/heads/macos'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: julia-macos
+          name: macOS arm64 Julia toolchain (julia-macos)
+          body: |
+            Relocatable Julia + juliac toolchain for the macOS arm64 libMad
+            build. Provider artifact (no Docker on macOS); consumed by the
+            `main` branch's macOS libMad build.
+
+            - Julia version: ${{ env.JULIA_VERSION }}
+            - Source commit: ${{ github.sha }}
+            - Build run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Bundle restores to `$HOME/polyglot-julia`. Overwritten on every
+            provider build; not for reproducible pinning.
+          files: out/julia-toolchain-osx-arm64.tar.gz
+          make_latest: false
