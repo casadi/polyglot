@@ -74,6 +74,9 @@ cat > Make.user <<EOF
 USE_BINARYBUILDER=${USE_BINARYBUILDER}
 JULIA_CPU_TARGET=${JULIA_CPU_TARGET}
 DISABLE_LIBUNWIND:=1
+# macOS always ships system zlib; building it from source gave LLVM's bootstrap
+# tablegen tools an unresolvable @rpath/libz.dylib. zlib isn't parity-sensitive.
+USE_SYSTEM_ZLIB:=1
 EOF
 cat Make.user
 echo
@@ -141,6 +144,22 @@ export PATH="$WORK/fcbin:$PATH"
 echo "  FC_BIN=$FC_BIN"
 gfortran -dM -E - < /dev/null | grep __GNUC__ \
   || { echo "gfortran probe still failing" >&2; exit 1; }
+
+echo "=== 3c) dedupe duplicate LC_RPATH in gfortran runtime dylibs ==="
+# The action-setup-compiler conda gfortran ships libgfortran/libquadmath with
+# TWO identical '@loader_path' LC_RPATHs; the macos-14 linker (ld-prime) treats
+# duplicate LC_RPATH as a fatal error (breaks the OpenBLAS test link). Drop the
+# extras and re-sign. (install_name_tool invalidates the ad-hoc signature.)
+GF_LIBDIR="$(cd "$(dirname "$FC_BIN")/../lib" && pwd)"
+echo "  gfortran runtime libdir: $GF_LIBDIR"
+for f in "$GF_LIBDIR"/libgfortran*.dylib "$GF_LIBDIR"/libquadmath*.dylib \
+         "$GF_LIBDIR"/libgcc_s*.dylib "$GF_LIBDIR"/libgomp*.dylib; do
+  [ -e "$f" ] || continue
+  while [ "$(otool -l "$f" | grep -c 'path @loader_path ')" -gt 1 ]; do
+    install_name_tool -delete_rpath @loader_path "$f" 2>/dev/null || break
+  done
+  codesign -f -s - "$f" 2>/dev/null || true
+done
 
 echo "=== 4) build (make -j$BUILD_JOBS) ==="
 date
