@@ -49,6 +49,17 @@ cmake --version | head -1 || true
 echo "cores=$BUILD_JOBS  USE_BINARYBUILDER=$USE_BINARYBUILDER  SDKROOT=${SDKROOT:-<unset>}"
 echo
 
+echo "=== use native macOS toolchain for Julia-from-source ==="
+# casadi/action-setup-compiler points CC/CXX/SDKROOT at an old cross SDK
+# (MacOSX11.1) whose libc++ headers break Julia's C/C++ dep builds (p7zip
+# 'new' not found, openlibm malformed LC_DYSYMTAB) on the macos-14 linker.
+# Julia-from-source expects the runner's NATIVE Apple clang + current SDK
+# (as JuliaCI builds it). Drop the cross-SDK env; keep only gfortran (FC)
+# for the Fortran deps. clang falls back to `xcrun --show-sdk-path`.
+unset SDKROOT CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CC CXX CPP || true
+echo "native SDK: $(xcrun --show-sdk-path 2>/dev/null || echo '<xcrun failed>')"
+echo "clang: $(clang --version | head -1)"
+
 echo "=== 1) fetch Julia $JULIA_VERSION full source ==="
 # The -full tarball bundles dependency sources needed for USE_BINARYBUILDER=0.
 URL="https://github.com/JuliaLang/julia/releases/download/v${JULIA_VERSION}/julia-${JULIA_VERSION}-full.tar.gz"
