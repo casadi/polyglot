@@ -160,6 +160,13 @@ for f in "$GF_LIBDIR"/libgfortran*.dylib "$GF_LIBDIR"/libquadmath*.dylib \
   done
   codesign -f -s - "$f" 2>/dev/null || true
 done
+# Embed an absolute rpath to the gfortran runtime so binaries that load
+# libgfortran AT BUILD TIME (OpenBLAS's utest, Julia's sysimage/juliac) find
+# it — DYLD_* env can't help here, SIP strips it from the protected make/sh.
+# Threads into OpenBLAS via openblas.mk's LDFLAGS. Resolves on the consumer
+# too (same runner type + same action-setup-compiler conda env path).
+export LDFLAGS="-Wl,-rpath,$GF_LIBDIR${LDFLAGS:+ $LDFLAGS}"
+echo "  LDFLAGS=$LDFLAGS"
 
 echo "=== 4) build (make -j$BUILD_JOBS) ==="
 date
