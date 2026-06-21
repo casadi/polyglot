@@ -1,0 +1,97 @@
+name: build macOS Julia toolchain (no libunwind)
+
+# Provider step (macOS analogue of the `docker` branch's image build).
+# Builds Julia FROM SOURCE with DISABLE_LIBUNWIND=1 (the official macOS binary
+# bundles libunwind, which clashes when libMad is loaded into a host that
+# already has one — the same "Matlab clash" the Linux build avoids). Bakes the
+# result + the juliac app into a relocatable tarball and publishes it to the
+# perennial `julia-macos` release, consumed by the `main` branch's libMad build.
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - .github/workflows/build-julia-macos.yml
+      - scripts/build-julia-macos.sh
+  workflow_dispatch:
+    inputs:
+      julia_version:
+        description: Julia version to build
+        required: false
+        default: '1.12.6'
+      use_binarybuilder:
+        description: "0 = deps from source (parity); 1 = official BB binaries (faster)"
+        required: false
+        default: '0'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-julia-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Julia osx-arm64 (no libunwind)
+    runs-on: macos-14
+    # USE_BINARYBUILDER=0 builds LLVM + all deps from source on a 3-core M1,
+    # which is slow; give it generous headroom under the 6h hard ceiling.
+    timeout-minutes: 350
+    env:
+      JULIA_VERSION: ${{ github.event.inputs.julia_version || '1.12.6' }}
+      USE_BINARYBUILDER: ${{ github.event.inputs.use_binarybuilder || '0' }}
+      BUNDLE_ROOT: ${{ github.workspace }}/polyglot-julia
+      OUT_DIR: ${{ github.workspace }}/out
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up compiler (casadi toolchain)
+        uses: casadi/action-setup-compiler@master
+        with:
+          cache-suffix: ''
+          target: arm64
+
+      - name: Build Julia toolchain
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          bash scripts/build-julia-macos.sh 2>&1 | tee out/build-julia.log
+
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-julia-log-osx-arm64
+          path: out/build-julia.log
+          if-no-files-found: warn
+
+      - name: Upload toolchain tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: julia-toolchain-osx-arm64
+          path: out/julia-toolchain-osx-arm64.tar.gz
+          if-no-files-found: error
+
+      - name: Publish to perennial 'julia-macos' release
+        if: github.ref == 'refs/heads/macos'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: julia-macos
+          name: macOS arm64 Julia toolchain (julia-macos)
+          body: |
+            Relocatable Julia + juliac toolchain for the macOS arm64 libMad
+            build, built FROM SOURCE with DISABLE_LIBUNWIND=1 (no libunwind, to
+            avoid the Matlab/host clash). Provider artifact (no Docker on
+            macOS); consumed by the `main` branch's macOS libMad build.
+
+            - Julia version: ${{ env.JULIA_VERSION }}
+            - USE_BINARYBUILDER: ${{ env.USE_BINARYBUILDER }}
+            - Source commit: ${{ github.sha }}
+            - Build run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Bundle restores to `$GITHUB_WORKSPACE/polyglot-julia`. Overwritten
+            on every provider build; not for reproducible pinning.
+          files: out/julia-toolchain-osx-arm64.tar.gz
+          make_latest: false
